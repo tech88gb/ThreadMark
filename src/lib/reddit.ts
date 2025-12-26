@@ -152,10 +152,12 @@ async function fetchTechCrunch(): Promise<RedditPost[]> {
 
     return recentPosts.map((item, index) => {
       const link = item.link || '';
-      const tcId = link.match(/\/(\d{4}\/\d{2}\/\d{2}\/[^/]+)/)?.[1] || `tc-${Date.now()}-${index}`;
+      // Create a safe ID by extracting slug and removing slashes
+      const slug = link.split('/').pop() || `tc-${Date.now()}-${index}`;
+      const tcId = `tc-${slug}`;
 
       return {
-        id: `tc-${tcId}`,
+        id: tcId,
         title: item.title || 'Untitled',
         subreddit: 'TechCrunch',
         score: 0,
