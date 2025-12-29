@@ -11,7 +11,15 @@ export interface RedditPost {
   trending?: boolean;
   trendingCount?: number;
   subredditRank?: number;
-  source: 'reddit' | 'hackernews' | 'techcrunch'; // Track source
+  source: 'reddit' | 'hackernews' | 'techcrunch';
+}
+
+export type TweetTone = 'hottake' | 'analytical' | 'sarcastic' | 'unhinged';
+
+export interface GeneratedTweet {
+  text: string;
+  tone: TweetTone;
+  characterCount: number;
 }
 
 export interface Stats {

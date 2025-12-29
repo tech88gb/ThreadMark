@@ -1,9 +1,20 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { RedditPost, PostsStorage, Stats } from '@/types/reddit';
+import { RedditPost, PostsStorage, Stats, TweetTone, GeneratedTweet } from '@/types/reddit';
 
 type Tab = 'pending' | 'history' | 'stats';
+
+interface TweetModalState {
+  isOpen: boolean;
+  post: RedditPost | null;
+  tweets: GeneratedTweet[];
+  selectedTweet: number;
+  loading: boolean;
+  tone: TweetTone;
+  imageUrl: string | null;
+  imageLoading: boolean;
+}
 
 export default function Dashboard() {
   const [posts, setPosts] = useState<RedditPost[]>([]);
@@ -14,6 +25,11 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('pending');
+  const [tweetModal, setTweetModal] = useState<TweetModalState>({
+    isOpen: false, post: null, tweets: [], selectedTweet: 0,
+    loading: false, tone: 'hottake', imageUrl: null, imageLoading: false,
+  });
+
 
   const stats: Stats = useMemo(() => {
     const now = Date.now();
@@ -73,11 +89,13 @@ export default function Dashboard() {
     }
   };
 
+
   const deletePost = async (postId: string) => {
     try {
-      const res = await fetch(`/api/posts/${postId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' });
       const json = await res.json();
       if (json.success) updateFromStorage(json.data);
+      else setError(json.error || 'Failed to delete');
     } catch {
       setError('Failed to delete');
     }
@@ -85,9 +103,10 @@ export default function Dashboard() {
 
   const markAsPosted = async (postId: string) => {
     try {
-      const res = await fetch(`/api/posts/${postId}/posted`, { method: 'POST' });
+      const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/posted`, { method: 'POST' });
       const json = await res.json();
       if (json.success) updateFromStorage(json.data);
+      else setError(json.error || 'Failed to mark');
     } catch {
       setError('Failed to mark');
     }
@@ -120,6 +139,68 @@ export default function Dashboard() {
   useEffect(() => { loadPosts(); }, [loadPosts]);
 
 
+  // Tweet generation functions
+  const openTweetModal = (post: RedditPost) => {
+    setTweetModal({
+      isOpen: true, post, tweets: [], selectedTweet: 0,
+      loading: true, tone: 'hottake', imageUrl: null, imageLoading: true,
+    });
+    
+    // Fetch tweets and image in parallel (don't await, let them update state)
+    generateTweetsForPost(post, 'hottake');
+    fetchPostImage(post);
+  };
+
+  const generateTweetsForPost = async (post: RedditPost, tone: TweetTone) => {
+    setTweetModal(prev => ({ ...prev, loading: true, tone, selectedTweet: 0 }));
+    try {
+      const res = await fetch('/api/tweet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: post.title, url: post.url, tone }),
+      });
+      const json = await res.json();
+      if (json.success && json.data.tweets?.length) {
+        setTweetModal(prev => ({ ...prev, tweets: json.data.tweets, loading: false }));
+      } else {
+        setTweetModal(prev => ({ ...prev, tweets: [], loading: false }));
+      }
+    } catch {
+      setTweetModal(prev => ({ ...prev, tweets: [], loading: false }));
+    }
+  };
+
+  const fetchPostImage = async (post: RedditPost) => {
+    try {
+      const res = await fetch('/api/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: post.url }),
+      });
+      const json = await res.json();
+      if (json.success && json.data.imageUrl) {
+        setTweetModal(prev => ({ ...prev, imageUrl: json.data.imageUrl, imageLoading: false }));
+      } else {
+        setTweetModal(prev => ({ ...prev, imageLoading: false }));
+      }
+    } catch {
+      setTweetModal(prev => ({ ...prev, imageLoading: false }));
+    }
+  };
+
+
+  const postToX = (tweetText: string) => {
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
+    window.open(intentUrl, '_blank');
+  };
+
+  const closeTweetModal = () => {
+    setTweetModal({
+      isOpen: false, post: null, tweets: [], selectedTweet: 0,
+      loading: false, tone: 'hottake', imageUrl: null, imageLoading: false,
+    });
+  };
+
   const subredditColors: Record<string, string> = {
     technology: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
     programming: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
@@ -143,6 +224,14 @@ export default function Dashboard() {
     };
     return badges[source as keyof typeof badges] || badges.reddit;
   };
+
+  const toneOptions: { value: TweetTone; label: string; emoji: string }[] = [
+    { value: 'hottake', label: 'Hot Take', emoji: '🔥' },
+    { value: 'analytical', label: 'Analytical', emoji: '🧠' },
+    { value: 'sarcastic', label: 'Sarcastic', emoji: '😏' },
+    { value: 'unhinged', label: 'Unhinged', emoji: '😈' },
+  ];
+
 
   const PostCard = ({ post, isHistory = false }: { post: RedditPost; isHistory?: boolean }) => {
     const sourceBadge = getSourceBadge(post.source);
@@ -176,22 +265,16 @@ export default function Dashboard() {
           
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              onClick={() => openTweetModal(post)}
+              className="px-3 py-1.5 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
+            >
+              Generate Tweet
+            </button>
+            <button
               onClick={() => copy(`${post.title}\n\n${post.url}`, post.id, 'all')}
               className="px-3 py-1.5 text-sm font-medium bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-md hover:opacity-90 transition-opacity"
             >
               {copiedId === `${post.id}-all` ? 'Copied!' : 'Copy'}
-            </button>
-            <button
-              onClick={() => copy(post.title, post.id, 'title')}
-              className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
-            >
-              {copiedId === `${post.id}-title` ? 'Copied' : 'Title'}
-            </button>
-            <button
-              onClick={() => copy(post.url, post.id, 'link')}
-              className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
-            >
-              {copiedId === `${post.id}-link` ? 'Copied' : 'Link'}
             </button>
             <a
               href={post.permalink}
@@ -225,8 +308,230 @@ export default function Dashboard() {
 };
 
 
+  // Tweet Modal Component
+  const TweetModal = () => {
+    if (!tweetModal.isOpen || !tweetModal.post) return null;
+    
+    const selectedTweet = tweetModal.tweets[tweetModal.selectedTweet];
+    
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white dark:bg-gray-900 rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="p-6 border-b border-gray-200 dark:border-gray-800">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Generate Tweet</h2>
+              <button onClick={closeTweetModal} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-sm text-gray-500 mt-1 line-clamp-2">{tweetModal.post.title}</p>
+          </div>
+          
+          <div className="p-6 space-y-6">
+            {/* Tone Selector */}
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2 block">Tone</label>
+              <div className="flex gap-2 flex-wrap">
+                {toneOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => generateTweetsForPost(tweetModal.post!, option.value)}
+                    className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                      tweetModal.tone === option.value
+                        ? 'bg-blue-500 text-white border-blue-500'
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-blue-300'
+                    }`}
+                  >
+                    {option.emoji} {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            
+            {/* Image Preview */}
+            {tweetModal.imageLoading ? (
+              <div className="h-40 bg-gray-100 dark:bg-gray-800 rounded-lg flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-gray-300 dark:border-gray-600 border-t-blue-500 rounded-full animate-spin" />
+              </div>
+            ) : tweetModal.imageUrl ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Image</label>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={async () => {
+                        try {
+                          // Fetch image and convert to PNG for clipboard compatibility
+                          const response = await fetch(tweetModal.imageUrl!);
+                          const blob = await response.blob();
+                          
+                          // Create canvas to convert image to PNG
+                          const img = new Image();
+                          img.crossOrigin = 'anonymous';
+                          
+                          await new Promise((resolve, reject) => {
+                            img.onload = resolve;
+                            img.onerror = reject;
+                            img.src = URL.createObjectURL(blob);
+                          });
+                          
+                          const canvas = document.createElement('canvas');
+                          canvas.width = img.width;
+                          canvas.height = img.height;
+                          const ctx = canvas.getContext('2d')!;
+                          ctx.drawImage(img, 0, 0);
+                          
+                          // Convert to PNG blob
+                          const pngBlob = await new Promise<Blob>((resolve) => {
+                            canvas.toBlob((b) => resolve(b!), 'image/png');
+                          });
+                          
+                          await navigator.clipboard.write([
+                            new ClipboardItem({ 'image/png': pngBlob })
+                          ]);
+                          
+                          setCopiedId('image-copied');
+                          setTimeout(() => setCopiedId(null), 2000);
+                          URL.revokeObjectURL(img.src);
+                        } catch (err) {
+                          console.error('Failed to copy image:', err);
+                          // Fallback: open in new tab
+                          window.open(tweetModal.imageUrl!, '_blank');
+                          alert('Could not copy image. Opened in new tab instead - right click to save.');
+                        }
+                      }}
+                      className="text-sm text-blue-500 hover:text-blue-600 font-medium"
+                    >
+                      {copiedId === 'image-copied' ? '✓ Copied!' : '📋 Copy image'}
+                    </button>
+                    <a
+                      href={tweetModal.imageUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+                    >
+                      Open ↗
+                    </a>
+                  </div>
+                </div>
+                <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                  <img src={tweetModal.imageUrl} alt="Preview" className="w-full h-auto max-h-48 object-cover" />
+                </div>
+                
+                {/* Source Link below image */}
+                <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-800">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-400 truncate">{tweetModal.post?.url}</p>
+                  </div>
+                  <button
+                    onClick={() => copy(tweetModal.post!.url, 'source', 'link')}
+                    className="ml-2 text-xs text-blue-500 hover:text-blue-600 whitespace-nowrap"
+                  >
+                    {copiedId === 'source-link' ? '✓ Copied!' : 'Copy link'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Source Link</label>
+                  <button
+                    onClick={() => copy(tweetModal.post!.url, 'source', 'link')}
+                    className="text-sm text-blue-500 hover:text-blue-600 font-medium"
+                  >
+                    {copiedId === 'source-link' ? '✓ Copied!' : '📋 Copy link'}
+                  </button>
+                </div>
+                <div className="p-3 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                  <p className="text-sm text-gray-600 dark:text-gray-400 truncate">{tweetModal.post?.url}</p>
+                </div>
+                <p className="text-xs text-gray-400">No image found - copy the source link instead</p>
+              </div>
+            )}
+            
+            {/* Tweet Variations */}
+            {tweetModal.loading ? (
+              <div className="py-8 flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-gray-300 dark:border-gray-600 border-t-blue-500 rounded-full animate-spin" />
+                <span className="ml-3 text-gray-500">Generating tweets...</span>
+              </div>
+            ) : tweetModal.tweets.length > 0 && (
+              <div className="space-y-3">
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Choose a variation</label>
+                {tweetModal.tweets.map((tweet, index) => (
+                  <button
+                    key={index}
+                    onClick={() => setTweetModal(prev => ({ ...prev, selectedTweet: index }))}
+                    className={`w-full text-left p-4 rounded-lg border transition-colors ${
+                      tweetModal.selectedTweet === index
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                        : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+                    }`}
+                  >
+                    <p className="text-gray-900 dark:text-gray-100 text-sm">{tweet.text}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            
+            {/* Character Counter & Actions */}
+            {selectedTweet && (
+              <div className="pt-4 border-t border-gray-200 dark:border-gray-800">
+                <div className="flex items-center justify-between mb-4">
+                  <span className={`text-sm ${selectedTweet.characterCount > 280 ? 'text-red-500' : 'text-gray-500'}`}>
+                    {selectedTweet.characterCount}/280 characters
+                  </span>
+                  <button
+                    onClick={() => copy(selectedTweet.text, 'tweet', 'text')}
+                    className="text-sm text-blue-500 hover:text-blue-600"
+                  >
+                    {copiedId === 'tweet-text' ? 'Copied!' : 'Copy tweet text'}
+                  </button>
+                </div>
+                
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      // Don't copy text - it overwrites the image in clipboard!
+                      // X Intent URL already has the text pre-filled
+                      postToX(selectedTweet.text);
+                      markAsPosted(tweetModal.post!.id);
+                      closeTweetModal();
+                    }}
+                    className="flex-1 px-4 py-2.5 bg-black text-white rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                    </svg>
+                    Post to X
+                  </button>
+                  <button
+                    onClick={closeTweetModal}
+                    className="px-4 py-2.5 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-3 text-center">
+                  💡 Copy the image first, then click Post to X and paste it
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <TweetModal />
+      
       {/* Header */}
       <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800">
         <div className="max-w-4xl mx-auto px-6 py-5">
@@ -331,9 +636,10 @@ export default function Dashboard() {
                 </div>
 
                 <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-6">
-                  <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-4">By Subreddit</h3>
+                  <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-4">By Topic</h3>
                   <div className="space-y-3">
                     {Object.entries(stats.bySubreddit)
+                      .filter(([topic]) => !['HackerNews', 'TechCrunch'].includes(topic))
                       .sort(([, a], [, b]) => b - a)
                       .map(([sub, count]) => (
                         <div key={sub} className="flex items-center gap-4">
@@ -358,6 +664,7 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
         ) : activeTab === 'pending' ? (
           posts.length === 0 ? (
             <div className="text-center py-16">

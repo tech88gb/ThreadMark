@@ -32,7 +32,16 @@ async function fetchWithHeaders(url: string): Promise<string> {
   return response.text();
 }
 
-const parser = new Parser();
+// Custom parser to get content field from Reddit RSS
+const parser: Parser = new Parser({
+  customFields: {
+    item: [
+      ['content', 'content'],
+      ['content:encoded', 'contentEncoded'],
+      ['comments', 'comments'],
+    ],
+  },
+});
 
 function normalizeForComparison(title: string): string {
   return title
@@ -68,6 +77,59 @@ function extractPostId(link: string): string {
   return match ? match[1] : link;
 }
 
+// Extract the actual article URL from Reddit post content
+// Reddit RSS content contains HTML like: <a href="https://actual-article.com">[link]</a>
+function extractArticleUrl(item: Parser.Item, redditLink: string): string {
+  // Try multiple content fields - Reddit uses different ones
+  const itemAny = item as Record<string, unknown>;
+  const content = String(itemAny.content || itemAny.contentEncoded || itemAny['content:encoded'] || '');
+  
+  // Also check if item has a direct link that's not reddit
+  const directLink = item.link || '';
+  if (directLink && !directLink.includes('reddit.com') && !directLink.includes('redd.it')) {
+    console.log('Using direct link (not reddit):', directLink);
+    return directLink;
+  }
+  
+  if (!content || content === 'undefined') {
+    console.log('No content field found for:', redditLink);
+    return redditLink;
+  }
+  
+  // Reddit RSS format: <a href="URL">[link]</a> - the [link] one is the article
+  // First try to find the [link] specifically
+  const linkTagMatch = content.match(/<a[^>]*href="([^"]+)"[^>]*>\s*\[link\]/i);
+  if (linkTagMatch && linkTagMatch[1]) {
+    const url = linkTagMatch[1];
+    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
+      console.log('Found article URL via [link]:', url);
+      return url;
+    }
+  }
+  
+  // Try finding href with "link" text nearby
+  const linkTextMatch = content.match(/href="([^"]+)"[^>]*>.*?link/i);
+  if (linkTextMatch && linkTextMatch[1]) {
+    const url = linkTextMatch[1];
+    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
+      console.log('Found article URL via link text:', url);
+      return url;
+    }
+  }
+  
+  // Fallback: find any external URL (not reddit)
+  const allLinks = [...content.matchAll(/href="(https?:\/\/[^"]+)"/gi)];
+  for (const match of allLinks) {
+    const url = match[1];
+    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
+      console.log('Found external URL:', url);
+      return url;
+    }
+  }
+  
+  console.log('No external URL found, using reddit link');
+  return redditLink;
+}
 
 // Fetch Reddit top posts from a specific time window
 async function fetchRedditSubreddit(subreddit: string, timeWindow: 'day' | 'week'): Promise<RedditPost[]> {
@@ -76,18 +138,23 @@ async function fetchRedditSubreddit(subreddit: string, timeWindow: 'day' | 'week
     const xml = await fetchWithHeaders(url);
     const feed = await parser.parseString(xml);
 
-    return feed.items.slice(0, POSTS_PER_SUBREDDIT).map((item, index) => ({
-      id: extractPostId(item.link || ''),
-      title: item.title || 'Untitled',
-      subreddit,
-      score: 0,
-      num_comments: 0,
-      url: item.link || '',
-      created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-      permalink: item.link || '',
-      subredditRank: index + 1,
-      source: 'reddit' as const,
-    }));
+    return feed.items.slice(0, POSTS_PER_SUBREDDIT).map((item, index) => {
+      const redditLink = item.link || '';
+      const articleUrl = extractArticleUrl(item, redditLink);
+      
+      return {
+        id: extractPostId(redditLink),
+        title: item.title || 'Untitled',
+        subreddit,
+        score: 0,
+        num_comments: 0,
+        url: articleUrl, // The actual article URL (not reddit)
+        created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
+        permalink: redditLink, // Keep reddit link for "Open" button
+        subredditRank: index + 1,
+        source: 'reddit' as const,
+      };
+    });
   } catch (error) {
     console.error(`Error fetching r/${subreddit} (${timeWindow}):`, error);
     return [];
@@ -112,7 +179,9 @@ async function fetchHackerNews(): Promise<RedditPost[]> {
 
     return feed.items.slice(0, 20).map((item, index) => {
       const link = item.link || '';
-      const commentsMatch = item.comments?.match(/item\?id=(\d+)/);
+      const itemAny = item as Record<string, string>;
+      const commentsUrl = itemAny.comments || '';
+      const commentsMatch = commentsUrl.match(/item\?id=(\d+)/);
       const hnId = commentsMatch ? commentsMatch[1] : `hn-${Date.now()}-${index}`;
 
       return {
@@ -121,9 +190,9 @@ async function fetchHackerNews(): Promise<RedditPost[]> {
         subreddit: 'HackerNews',
         score: 0,
         num_comments: 0,
-        url: link,
+        url: link, // HN already has the actual article URL
         created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-        permalink: item.comments || link,
+        permalink: commentsUrl || link, // HN discussion link
         subredditRank: index + 1,
         source: 'hackernews' as const,
       };
