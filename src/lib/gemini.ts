@@ -150,8 +150,6 @@ Return only JSON:
 }
 
 function generateFallbackTweets(title: string, tone: TweetTone): GeneratedTweet[] {
-  const short = title.length > 40 ? title.substring(0, 40) + '...' : title;
-  
   const fallbacks: Record<TweetTone, string[]> = {
     hottake: [
       `they've been saying the opposite for years but sure`,
@@ -180,4 +178,111 @@ function generateFallbackTweets(title: string, tone: TweetTone): GeneratedTweet[
     tone,
     characterCount: text.length,
   }));
+}
+
+// Thread generation - creates a 3-5 tweet thread
+export interface GeneratedThread {
+  tweets: string[];
+  tone: TweetTone;
+}
+
+export async function generateThread(
+  title: string,
+  tone: TweetTone = 'analytical',
+  articleSummary: string | null = null
+): Promise<GeneratedThread> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY not configured');
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ 
+    model: 'gemini-2.5-flash',
+    generationConfig: { temperature: 0.8 }
+  });
+
+  let context = `NEWS: "${title}"`;
+  if (articleSummary) {
+    context += `\n\nARTICLE DETAILS:\n${articleSummary.substring(0, 800)}`;
+  }
+
+  const prompt = `${context}
+
+Write a Twitter THREAD (4 tweets) about this news. This should be informative and engaging.
+
+THREAD STRUCTURE:
+1. Hook - grab attention, state the news in an interesting way
+2. Context - why this matters, background info
+3. Analysis - your take, what this means, implications
+4. Closer - prediction, question, or call to action
+
+RULES:
+- Each tweet should be under 280 characters
+- First tweet should hook people to read more
+- Don't number the tweets (no "1/4" etc)
+- Sound like a knowledgeable person sharing insights, not a news outlet
+- Last tweet should invite discussion or make a prediction
+- NO hashtags
+
+Return JSON only:
+{"thread":["tweet 1","tweet 2","tweet 3","tweet 4"]}`;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const response = result.response.text();
+    
+    let clean = response.trim();
+    if (clean.includes('```')) {
+      clean = clean.replace(/```json?\s*/gi, '').replace(/```/g, '').trim();
+    }
+    
+    const parsed = JSON.parse(clean);
+    
+    if (!parsed.thread?.length) {
+      throw new Error('No thread in response');
+    }
+    
+    return {
+      tweets: parsed.thread.slice(0, 5),
+      tone,
+    };
+  } catch (error) {
+    console.error('Thread generation error:', error);
+    return {
+      tweets: [
+        `${title}`,
+        `Here's why this matters and what you need to know.`,
+        `The implications of this could be significant for the industry.`,
+        `What do you think - is this a good move? Reply with your take.`,
+      ],
+      tone,
+    };
+  }
+}
+
+// Call-to-action suggestions
+export const CTA_OPTIONS = [
+  { id: 'none', label: 'No CTA', text: '' },
+  { id: 'thoughts', label: 'Thoughts?', text: '\n\nthoughts?' },
+  { id: 'agree', label: 'Agree/Disagree', text: '\n\nagree or disagree?' },
+  { id: 'reply', label: 'Reply', text: '\n\nreply with your take' },
+  { id: 'predict', label: 'Prediction', text: '\n\nwhat do you think happens next?' },
+  { id: 'hot', label: 'Hot Take', text: '\n\nam I wrong?' },
+  { id: 'discuss', label: 'Discuss', text: '\n\nlet\'s discuss 👇' },
+] as const;
+
+export type CTAOption = typeof CTA_OPTIONS[number]['id'];
+
+export function addCTA(tweet: string, ctaId: CTAOption): string {
+  const cta = CTA_OPTIONS.find(c => c.id === ctaId);
+  if (!cta || cta.id === 'none') return tweet;
+  
+  const combined = tweet + cta.text;
+  // Make sure we don't exceed 280 chars
+  if (combined.length > 280) {
+    return tweet; // Skip CTA if it would exceed limit
+  }
+  return combined;
 }

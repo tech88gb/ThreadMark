@@ -1,10 +1,10 @@
 import Parser from 'rss-parser';
 import { RedditPost } from '@/types/reddit';
 
-// 8 tech subreddits (removed futurology - lower quality)
+// Tech subreddits for popular content
 const SUBREDDITS = [
   'technology',
-  'programming',
+  'programming', 
   'technews',
   'MachineLearning',
   'artificial',
@@ -13,12 +13,13 @@ const SUBREDDITS = [
   'gadgets',
 ];
 
-// HN - stories with 150+ points (guaranteed popular)
-const HACKERNEWS_FEED = 'https://hnrss.org/newest?points=150&count=25';
-// TechCrunch - major tech news and startup coverage
+// RSS Feeds
+const HACKERNEWS_FEED = 'https://hnrss.org/newest?points=150&count=30';
 const TECHCRUNCH_FEED = 'https://techcrunch.com/feed/';
+const WIRED_FEED = 'https://www.wired.com/feed/rss';
+const GOOGLE_NEWS_TECH = 'https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB';
 
-const POSTS_PER_SUBREDDIT = 10; // Fetch more to ensure 25 after dedup
+const POSTS_PER_SUBREDDIT = 8;
 const TOTAL_TARGET = 25;
 
 async function fetchWithHeaders(url: string): Promise<string> {
@@ -32,13 +33,13 @@ async function fetchWithHeaders(url: string): Promise<string> {
   return response.text();
 }
 
-// Custom parser to get content field from Reddit RSS
 const parser: Parser = new Parser({
   customFields: {
     item: [
       ['content', 'content'],
       ['content:encoded', 'contentEncoded'],
       ['comments', 'comments'],
+      ['source', 'sourceInfo'],
     ],
   },
 });
@@ -74,110 +75,107 @@ function areSameTopic(title1: string, title2: string): boolean {
 
 function extractPostId(link: string): string {
   const match = link.match(/comments\/([a-z0-9]+)/i);
-  return match ? match[1] : link;
+  return match ? match[1] : `post-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Check if a Reddit post is a self-post (discussion) vs link post
+function isSelfPost(url: string, redditLink: string): boolean {
+  return url.includes('reddit.com') || url.includes('redd.it') || url === redditLink;
 }
 
 // Extract the actual article URL from Reddit post content
-// Reddit RSS content contains HTML like: <a href="https://actual-article.com">[link]</a>
 function extractArticleUrl(item: Parser.Item, redditLink: string): string {
-  // Try multiple content fields - Reddit uses different ones
   const itemAny = item as Record<string, unknown>;
-  const content = String(itemAny.content || itemAny.contentEncoded || itemAny['content:encoded'] || '');
   
-  // Also check if item has a direct link that's not reddit
-  const directLink = item.link || '';
+  // Method 1: Check if the item's link itself is external
+  const directLink = String(item.link || '');
   if (directLink && !directLink.includes('reddit.com') && !directLink.includes('redd.it')) {
-    console.log('Using direct link (not reddit):', directLink);
     return directLink;
   }
   
-  if (!content || content === 'undefined') {
-    console.log('No content field found for:', redditLink);
-    return redditLink;
-  }
+  // Method 2: Parse the content field for [link] href
+  const content = String(
+    itemAny.content || 
+    itemAny.contentEncoded || 
+    itemAny['content:encoded'] || 
+    itemAny.description ||
+    ''
+  );
   
-  // Reddit RSS format: <a href="URL">[link]</a> - the [link] one is the article
-  // First try to find the [link] specifically
-  const linkTagMatch = content.match(/<a[^>]*href="([^"]+)"[^>]*>\s*\[link\]/i);
-  if (linkTagMatch && linkTagMatch[1]) {
-    const url = linkTagMatch[1];
-    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
-      console.log('Found article URL via [link]:', url);
-      return url;
+  if (content && content.length > 10) {
+    // Pattern 1: [link] anchor tag
+    const linkMatch = content.match(/<a[^>]+href=["']([^"']+)["'][^>]*>\s*\[link\]/i);
+    if (linkMatch?.[1] && !linkMatch[1].includes('reddit.com')) {
+      return linkMatch[1];
+    }
+    
+    // Pattern 2: First external href
+    const hrefMatches = content.matchAll(/href=["'](https?:\/\/[^"']+)["']/gi);
+    for (const match of hrefMatches) {
+      const url = match[1];
+      if (url && !url.includes('reddit.com') && !url.includes('redd.it')) {
+        return url;
+      }
     }
   }
   
-  // Try finding href with "link" text nearby
-  const linkTextMatch = content.match(/href="([^"]+)"[^>]*>.*?link/i);
-  if (linkTextMatch && linkTextMatch[1]) {
-    const url = linkTextMatch[1];
-    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
-      console.log('Found article URL via link text:', url);
-      return url;
-    }
-  }
-  
-  // Fallback: find any external URL (not reddit)
-  const allLinks = [...content.matchAll(/href="(https?:\/\/[^"]+)"/gi)];
-  for (const match of allLinks) {
-    const url = match[1];
-    if (!url.includes('reddit.com') && !url.includes('redd.it')) {
-      console.log('Found external URL:', url);
-      return url;
-    }
-  }
-  
-  console.log('No external URL found, using reddit link');
   return redditLink;
 }
 
-// Fetch Reddit top posts from a specific time window
-async function fetchRedditSubreddit(subreddit: string, timeWindow: 'day' | 'week'): Promise<RedditPost[]> {
+// Fetch Reddit - filter out self-posts
+async function fetchRedditSubreddit(subreddit: string): Promise<RedditPost[]> {
   try {
-    const url = `https://www.reddit.com/r/${subreddit}/top/.rss?t=${timeWindow}`;
+    const url = `https://www.reddit.com/r/${subreddit}/top/.rss?t=week`;
     const xml = await fetchWithHeaders(url);
     const feed = await parser.parseString(xml);
 
-    return feed.items.slice(0, POSTS_PER_SUBREDDIT).map((item, index) => {
+    const posts: RedditPost[] = [];
+    
+    for (let i = 0; i < feed.items.length && posts.length < POSTS_PER_SUBREDDIT; i++) {
+      const item = feed.items[i];
       const redditLink = item.link || '';
       const articleUrl = extractArticleUrl(item, redditLink);
       
-      return {
+      // Skip self-posts (discussions without external links)
+      if (isSelfPost(articleUrl, redditLink)) {
+        continue;
+      }
+      
+      posts.push({
         id: extractPostId(redditLink),
         title: item.title || 'Untitled',
         subreddit,
         score: 0,
         num_comments: 0,
-        url: articleUrl, // The actual article URL (not reddit)
+        url: articleUrl,
         created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-        permalink: redditLink, // Keep reddit link for "Open" button
-        subredditRank: index + 1,
+        permalink: redditLink,
+        subredditRank: posts.length + 1,
         source: 'reddit' as const,
-      };
-    });
+      });
+    }
+    
+    return posts;
   } catch (error) {
-    console.error(`Error fetching r/${subreddit} (${timeWindow}):`, error);
+    console.error(`Error fetching r/${subreddit}:`, error);
     return [];
   }
 }
 
-// Fetch from all Reddit subreddits - only use WEEK for truly popular posts
 async function fetchAllReddit(): Promise<RedditPost[]> {
-  // Only fetch top from week - these are the truly popular posts
-  const weekPosts = await Promise.all(
-    SUBREDDITS.map(sub => fetchRedditSubreddit(sub, 'week'))
+  const allPosts = await Promise.all(
+    SUBREDDITS.map(sub => fetchRedditSubreddit(sub))
   );
-  
-  return weekPosts.flat();
+  return allPosts.flat();
 }
 
-// Fetch from HackerNews - only high-point stories (150+)
+// Fetch HackerNews
 async function fetchHackerNews(): Promise<RedditPost[]> {
   try {
     const xml = await fetchWithHeaders(HACKERNEWS_FEED);
     const feed = await parser.parseString(xml);
 
-    return feed.items.slice(0, 20).map((item, index) => {
+    return feed.items.slice(0, 25).map((item, index) => {
       const link = item.link || '';
       const itemAny = item as Record<string, string>;
       const commentsUrl = itemAny.comments || '';
@@ -190,9 +188,9 @@ async function fetchHackerNews(): Promise<RedditPost[]> {
         subreddit: 'HackerNews',
         score: 0,
         num_comments: 0,
-        url: link, // HN already has the actual article URL
+        url: link,
         created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-        permalink: commentsUrl || link, // HN discussion link
+        permalink: commentsUrl || link,
         subredditRank: index + 1,
         source: 'hackernews' as const,
       };
@@ -203,49 +201,113 @@ async function fetchHackerNews(): Promise<RedditPost[]> {
   }
 }
 
-// Fetch from TechCrunch - major tech news
+// Fetch TechCrunch
 async function fetchTechCrunch(): Promise<RedditPost[]> {
   try {
     const xml = await fetchWithHeaders(TECHCRUNCH_FEED);
     const feed = await parser.parseString(xml);
     
-    // Get recent articles (last 3 days for freshness)
     const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
     
-    const recentPosts = feed.items
+    return feed.items
       .filter(item => {
         const pubDate = item.pubDate ? new Date(item.pubDate).getTime() : 0;
         return pubDate > threeDaysAgo;
       })
-      .slice(0, 20);
-
-    return recentPosts.map((item, index) => {
-      const link = item.link || '';
-      // Create a safe ID by extracting slug and removing slashes
-      const slug = link.split('/').pop() || `tc-${Date.now()}-${index}`;
-      const tcId = `tc-${slug}`;
-
-      return {
-        id: tcId,
-        title: item.title || 'Untitled',
-        subreddit: 'TechCrunch',
-        score: 0,
-        num_comments: 0,
-        url: link,
-        created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-        permalink: link,
-        subredditRank: index + 1,
-        source: 'techcrunch' as const,
-      };
-    });
+      .slice(0, 15)
+      .map((item, index) => {
+        const link = item.link || '';
+        return {
+          id: `tc-${link.split('/').pop() || index}`,
+          title: item.title || 'Untitled',
+          subreddit: 'TechCrunch',
+          score: 0,
+          num_comments: 0,
+          url: link,
+          created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
+          permalink: link,
+          subredditRank: index + 1,
+          source: 'techcrunch' as const,
+        };
+      });
   } catch (error) {
     console.error('Error fetching TechCrunch:', error);
     return [];
   }
 }
 
+// Fetch Wired
+async function fetchWired(): Promise<RedditPost[]> {
+  try {
+    const xml = await fetchWithHeaders(WIRED_FEED);
+    const feed = await parser.parseString(xml);
+    
+    const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000;
+    
+    return feed.items
+      .filter(item => {
+        const pubDate = item.pubDate ? new Date(item.pubDate).getTime() : 0;
+        return pubDate > fiveDaysAgo;
+      })
+      .slice(0, 15)
+      .map((item, index) => {
+        const link = item.link || '';
+        return {
+          id: `wired-${link.split('/').pop() || index}`,
+          title: item.title || 'Untitled',
+          subreddit: 'Wired',
+          score: 0,
+          num_comments: 0,
+          url: link,
+          created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
+          permalink: link,
+          subredditRank: index + 1,
+          source: 'wired' as const,
+        };
+      });
+  } catch (error) {
+    console.error('Error fetching Wired:', error);
+    return [];
+  }
+}
 
-// Detect trending across ALL sources
+// Fetch Google News Tech - trending tech stories
+async function fetchGoogleNews(): Promise<RedditPost[]> {
+  try {
+    const xml = await fetchWithHeaders(GOOGLE_NEWS_TECH);
+    const feed = await parser.parseString(xml);
+    
+    return feed.items.slice(0, 20).map((item, index) => {
+      const link = item.link || '';
+      const itemAny = item as Record<string, unknown>;
+      
+      // Google News wraps the actual URL, try to extract source
+      let sourceUrl = link;
+      const sourceInfo = itemAny.sourceInfo as { url?: string } | undefined;
+      if (sourceInfo?.url) {
+        sourceUrl = sourceInfo.url;
+      }
+      
+      return {
+        id: `gn-${Date.now()}-${index}`,
+        title: item.title?.replace(/ - .*$/, '') || 'Untitled', // Remove source suffix
+        subreddit: 'GoogleNews',
+        score: 0,
+        num_comments: 0,
+        url: sourceUrl,
+        created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
+        permalink: link,
+        subredditRank: index + 1,
+        source: 'googlenews' as const,
+      };
+    });
+  } catch (error) {
+    console.error('Error fetching Google News:', error);
+    return [];
+  }
+}
+
+// Detect trending - posts appearing on multiple sources
 function detectTrending(posts: RedditPost[]): RedditPost[] {
   const topicGroups: Map<string, RedditPost[]> = new Map();
   
@@ -254,7 +316,8 @@ function detectTrending(posts: RedditPost[]): RedditPost[] {
     
     for (const [, group] of topicGroups) {
       if (areSameTopic(post.title, group[0].title)) {
-        if (!group.some(p => p.source === post.source && p.subreddit === post.subreddit)) {
+        // Only count if from different source
+        if (!group.some(p => p.source === post.source)) {
           group.push(post);
         }
         foundGroup = true;
@@ -285,18 +348,26 @@ function detectTrending(posts: RedditPost[]): RedditPost[] {
   });
 }
 
-// Deduplicate - remove similar posts, keep best version
+// Deduplicate posts
 function deduplicatePosts(posts: RedditPost[]): RedditPost[] {
   const seen = new Map<string, RedditPost>();
   const seenUrls = new Set<string>();
   
   for (const post of posts) {
+    // Skip if we've seen this exact URL
     if (seenUrls.has(post.url)) continue;
     
+    // Skip if similar title exists
     let isDuplicate = false;
-    for (const [existingNorm] of seen) {
+    for (const [existingNorm, existingPost] of seen) {
       if (areSameTopic(post.title, existingNorm)) {
-        isDuplicate = true;
+        // Keep the trending one, or the one from a better source
+        if (post.trending && !existingPost.trending) {
+          seen.delete(existingNorm);
+          seenUrls.delete(existingPost.url);
+        } else {
+          isDuplicate = true;
+        }
         break;
       }
     }
@@ -312,29 +383,38 @@ function deduplicatePosts(posts: RedditPost[]): RedditPost[] {
 
 // Main fetch function - ALWAYS returns exactly 25 posts
 export async function fetchRedditPosts(): Promise<RedditPost[]> {
-  console.log('Fetching from Reddit (top/week), HackerNews, and TechCrunch...');
+  console.log('Fetching from all sources...');
   
   // Fetch from all sources in parallel
-  const [redditPosts, hnPosts, tcPosts] = await Promise.all([
+  const [redditPosts, hnPosts, tcPosts, wiredPosts, gnPosts] = await Promise.all([
     fetchAllReddit(),
     fetchHackerNews(),
     fetchTechCrunch(),
+    fetchWired(),
+    fetchGoogleNews(),
   ]);
   
-  console.log(`Fetched - Reddit: ${redditPosts.length}, HN: ${hnPosts.length}, TC: ${tcPosts.length}`);
+  console.log(`Fetched - Reddit: ${redditPosts.length}, HN: ${hnPosts.length}, TC: ${tcPosts.length}, Wired: ${wiredPosts.length}, GNews: ${gnPosts.length}`);
   
   // Combine all posts
-  const allPosts = [...redditPosts, ...hnPosts, ...tcPosts];
+  const allPosts = [...redditPosts, ...hnPosts, ...tcPosts, ...wiredPosts, ...gnPosts];
   
-  // Detect trending across all sources
+  // Detect trending (appears on multiple sources)
   const withTrending = detectTrending(allPosts);
   
-  // Sort by: trending first, then by rank within source, then by recency
+  // Sort: trending first (by count), then by recency
   withTrending.sort((a, b) => {
+    // Trending posts first
     if (a.trending && !b.trending) return -1;
     if (!a.trending && b.trending) return 1;
-    const rankDiff = (a.subredditRank || 99) - (b.subredditRank || 99);
-    if (rankDiff !== 0) return rankDiff;
+    
+    // Among trending, sort by how many sources
+    if (a.trending && b.trending) {
+      const countDiff = (b.trendingCount || 0) - (a.trendingCount || 0);
+      if (countDiff !== 0) return countDiff;
+    }
+    
+    // Then by recency
     return b.created_utc - a.created_utc;
   });
   
@@ -343,24 +423,15 @@ export async function fetchRedditPosts(): Promise<RedditPost[]> {
   
   console.log(`After dedup: ${uniquePosts.length} unique posts`);
   
-  // Final sort: trending first, then by recency
-  uniquePosts.sort((a, b) => {
-    if (a.trending && !b.trending) return -1;
-    if (!a.trending && b.trending) return 1;
-    return b.created_utc - a.created_utc;
-  });
+  // Ensure exactly 25 posts
+  let result = uniquePosts.slice(0, TOTAL_TARGET);
   
-  // ALWAYS return exactly 25 posts
-  // If we have more than 25, take top 25
-  // If we have less than 25, we still return what we have (edge case)
-  const result = uniquePosts.slice(0, TOTAL_TARGET);
-  
-  console.log(`Returning ${result.length} posts (target: ${TOTAL_TARGET})`);
-  
-  // If we don't have enough, log a warning
+  // If we don't have enough, we still return what we have
   if (result.length < TOTAL_TARGET) {
-    console.warn(`Warning: Only ${result.length} posts available, target was ${TOTAL_TARGET}`);
+    console.warn(`Only ${result.length} posts available (target: ${TOTAL_TARGET})`);
   }
+  
+  console.log(`Returning ${result.length} posts`);
   
   return result;
 }

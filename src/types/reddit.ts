@@ -11,7 +11,7 @@ export interface RedditPost {
   trending?: boolean;
   trendingCount?: number;
   subredditRank?: number;
-  source: 'reddit' | 'hackernews' | 'techcrunch';
+  source: 'reddit' | 'hackernews' | 'techcrunch' | 'wired' | 'googlenews';
 }
 
 export type TweetTone = 'hottake' | 'analytical' | 'sarcastic' | 'unhinged';
