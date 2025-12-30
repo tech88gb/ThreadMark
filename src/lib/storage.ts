@@ -1,18 +1,9 @@
-import { promises as fs } from 'fs';
-import path from 'path';
 import { PostsStorage, RedditPost } from '@/types/reddit';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const POSTS_FILE = path.join(DATA_DIR, 'posts.json');
 const EXPIRY_DAYS = 4;
 
-async function ensureDataDir(): Promise<void> {
-  try {
-    await fs.access(DATA_DIR);
-  } catch {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-  }
-}
+// In-memory storage for Vercel (since filesystem is read-only)
+let memoryStorage: PostsStorage | null = null;
 
 // Remove posts older than EXPIRY_DAYS
 function cleanupOldPosts(posts: RedditPost[]): RedditPost[] {
@@ -32,40 +23,36 @@ function isStorageExpired(generatedAt: string): boolean {
 }
 
 export async function readPosts(): Promise<PostsStorage> {
-  try {
-    await ensureDataDir();
-    const data = await fs.readFile(POSTS_FILE, 'utf-8');
-    let storage = JSON.parse(data) as PostsStorage;
-    
-    if (!storage.posted) storage.posted = [];
-    
-    // Auto-cleanup: if storage is older than 4 days, reset everything
-    if (isStorageExpired(storage.generated_at)) {
-      storage = { generated_at: new Date().toISOString(), posts: [], posted: [] };
-      await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
-      return storage;
-    }
-    
-    // Clean up old posts from both lists
-    const originalPostsCount = storage.posts.length;
-    const originalPostedCount = storage.posted.length;
-    
-    storage.posts = cleanupOldPosts(storage.posts);
-    storage.posted = cleanupOldPosts(storage.posted);
-    
-    // Save if anything was cleaned up
-    if (storage.posts.length !== originalPostsCount || storage.posted.length !== originalPostedCount) {
-      await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
-    }
-    
-    return storage;
-  } catch {
-    return { generated_at: new Date().toISOString(), posts: [], posted: [] };
+  // Use in-memory storage for Vercel
+  if (!memoryStorage) {
+    memoryStorage = { 
+      generated_at: new Date().toISOString(), 
+      posts: [], 
+      posted: [] 
+    };
   }
+  
+  // Auto-cleanup: if storage is older than 4 days, reset everything
+  if (isStorageExpired(memoryStorage.generated_at)) {
+    memoryStorage = { 
+      generated_at: new Date().toISOString(), 
+      posts: [], 
+      posted: [] 
+    };
+    return memoryStorage;
+  }
+  
+  // Clean up old posts from both lists
+  const originalPostsCount = memoryStorage.posts.length;
+  const originalPostedCount = memoryStorage.posted.length;
+  
+  memoryStorage.posts = cleanupOldPosts(memoryStorage.posts);
+  memoryStorage.posted = cleanupOldPosts(memoryStorage.posted);
+  
+  return memoryStorage;
 }
 
 export async function savePosts(posts: RedditPost[]): Promise<PostsStorage> {
-  await ensureDataDir();
   const existing = await readPosts();
   
   // Get IDs of posts already marked as done or deleted
@@ -74,20 +61,19 @@ export async function savePosts(posts: RedditPost[]): Promise<PostsStorage> {
   // Filter out posts that have already been marked as done
   const filteredPosts = posts.filter(post => !postedIds.has(post.id));
   
-  const storage: PostsStorage = {
+  memoryStorage = {
     generated_at: new Date().toISOString(),
     posts: cleanupOldPosts(filteredPosts),
     posted: cleanupOldPosts(existing.posted),
   };
   
-  await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
-  return storage;
+  return memoryStorage;
 }
 
 export async function deletePost(postId: string): Promise<PostsStorage> {
   const storage = await readPosts();
   storage.posts = storage.posts.filter(post => post.id !== postId);
-  await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
+  memoryStorage = storage;
   return storage;
 }
 
@@ -102,13 +88,13 @@ export async function markAsPosted(postId: string): Promise<PostsStorage> {
     storage.posts.splice(postIndex, 1);
   }
   
-  await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
+  memoryStorage = storage;
   return storage;
 }
 
 export async function clearPostedHistory(): Promise<PostsStorage> {
   const storage = await readPosts();
   storage.posted = [];
-  await fs.writeFile(POSTS_FILE, JSON.stringify(storage, null, 2), 'utf-8');
+  memoryStorage = storage;
   return storage;
 }
