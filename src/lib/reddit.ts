@@ -12,7 +12,7 @@ const SUBREDDITS = [
   'technews',
   'MachineLearning',
   'artificial',
-  'netsec',
+  'ProgrammerHumor',
   'cybersecurity',
   'gadgets',
 ];
